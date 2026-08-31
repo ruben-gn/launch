@@ -1,0 +1,7 @@
+# Gradle / build output
+build/
+.gradle/
+.kotlin/
+
+# Machine-specific: points at this VPS's SDK
+local.properties
