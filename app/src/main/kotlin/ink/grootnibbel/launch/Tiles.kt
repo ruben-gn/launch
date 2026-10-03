@@ -44,7 +44,6 @@ private val APPS = listOf(
 )
 
 private const val FALLBACK_COLOR = 0xFF2A2A32.toInt()
-private const val INPUT_COLOR = 0xFF1B1B24.toInt()
 
 fun appTiles(context: Context): List<Tile> {
     val pm = context.packageManager
@@ -68,7 +67,30 @@ fun appTiles(context: Context): List<Tile> {
     }
 }
 
-fun hdmiTiles(context: Context): List<Tile> {
+/**
+ * One of the TV's own inputs, as the sources row draws it.
+ *
+ * Not a `Tile`: an input has no banner artwork to render, and it carries a second line that a tile
+ * has nowhere to put. `title` is what you named the thing, `port` is where it is plugged in.
+ */
+data class Source(val title: String, val port: String, val launch: Intent)
+
+/**
+ * The four HDMI ports, in port order.
+ *
+ * `loadCustomLabel` is the whole reason this reads well: it returns the name *you* gave the input in
+ * the Philips setup — "KPN", "Digitale ontvanger" — and `loadLabel` returns the port it hangs off.
+ * Where you never named one, the port is the only name there is, so it becomes the title and the
+ * second line is dropped.
+ *
+ * **Connection state is deliberately not read.** It looks like the obvious way to dim a dead port,
+ * and the dormant version of this function did exactly that, but the signal does not mean what it
+ * says on this set: measured 2026-09-04, HDMI 1 reports CONNECTED while HDMI 2, 3 and 4 all report
+ * CONNECTED_STANDBY — including the two ports Philips' own hotplug listener says are empty. So the
+ * state cannot separate "a box in standby" from "nothing plugged in", and dimming on it would have
+ * greyed out the KPN receiver, which is one of the two inputs actually in use.
+ */
+fun hdmiSources(context: Context): List<Source> {
     val manager = context.getSystemService(Context.TV_INPUT_SERVICE) as? TvInputManager
         ?: return emptyList()
     val inputs = runCatching { manager.tvInputList }.getOrNull() ?: return emptyList()
@@ -76,15 +98,12 @@ fun hdmiTiles(context: Context): List<Tile> {
         .filter { it.type == TvInputInfo.TYPE_HDMI }
         .sortedBy { it.id }
         .map { info ->
-            val state = runCatching { manager.getInputState(info.id) }
-                .getOrDefault(TvInputManager.INPUT_STATE_DISCONNECTED)
-            Tile(
-                label = info.loadLabel(context)?.toString().orEmpty().ifBlank { info.id.substringAfterLast('/') },
-                art = TileArt.Solid(INPUT_COLOR),
-                color = INPUT_COLOR,
-                icon = null,
-                lightCorner = false,
-                dim = state != TvInputManager.INPUT_STATE_CONNECTED,
+            val port = runCatching { info.loadLabel(context) }.getOrNull()?.toString().orEmpty()
+                .ifBlank { info.id.substringAfterLast('/') }
+            val custom = runCatching { info.loadCustomLabel(context) }.getOrNull()?.toString()
+            Source(
+                title = custom?.takeIf { it.isNotBlank() } ?: port,
+                port = if (custom.isNullOrBlank()) "" else port,
                 launch = Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(info.id)),
             )
         }
@@ -116,3 +135,4 @@ private fun hasLightCorner(drawable: Drawable): Boolean {
     bitmap.recycle()
     return total / count > 140
 }
+

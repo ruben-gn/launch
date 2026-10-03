@@ -4,13 +4,13 @@ A native Kotlin launcher for the Philips living-room TV. Replaces FLauncher.
 
 Eight hardcoded app tiles in a 4×2 grid, rendered as each app's own `android:banner` artwork at
 native 16:9, over a dark gradient with one soft glow drifting slowly across it, and a 24-hour clock
-in the top right. Zero dependencies — no Compose, no AndroidX, no leanback library, just `Activity`
+in the top right, plus a sources row on the remote's SOURCE key. Zero dependencies — no Compose, no AndroidX, no leanback library, just `Activity`
 and the framework's `GridLayout`.
 
 | | |
 |---|---|
-| APK | 884 KB |
-| Resident memory (as home) | ~21.5 MB PSS |
+| APK | 914 KB |
+| Resident memory (as home) | ~20.9 MB PSS |
 | Background animation | 2.9% of one core, 0% janky frames |
 | FLauncher, for comparison | ~148 MB when it was home |
 
@@ -26,7 +26,7 @@ and the framework's `GridLayout`.
 | Screen | 1920×1080, density 320 → a **960×540 dp** layout canvas |
 | ABI | `armeabi-v7a` only — 32-bit ARM, no arm64 |
 | Input | `leanback_only`, no touchscreen — D-pad is the only way to drive it |
-| LAN | `192.168.1.141` |
+| LAN | `192.168.1.138` |
 
 The dp canvas is the constraint that shapes everything. After a 5% overscan margin you have about
 864×486 dp to work with, which is roughly a large phone in landscape.
@@ -39,7 +39,7 @@ The dp canvas is the constraint that shapes everything. After a 5% overscan marg
 the Raspberry Pi, which sits on the same LAN as the TV:
 
 ```
-VPS (hobby)  ──ssh──▶  Pi (rpi)  ──adb over LAN──▶  TV (192.168.1.141:5555)
+VPS (hobby)  ──ssh──▶  Pi (rpi)  ──adb over LAN──▶  TV (192.168.1.138:5555)
 ```
 
 So every TV command is an `ssh rpi` wrapping an `adb` call. `adb` is at `/usr/bin/adb` on the Pi.
@@ -47,39 +47,51 @@ So every TV command is an `ssh rpi` wrapping an `adb` call. `adb` is at `/usr/bi
 ### Connect
 
 ```sh
-ssh rpi 'adb connect 192.168.1.141:5555 && adb devices'
+ssh rpi 'adb connect 192.168.1.138:5555 && adb devices'
 ```
 
-Expect `192.168.1.141:5555   device`. The debugging key is already whitelisted on the TV and stays
+Expect `192.168.1.138:5555   device`. The debugging key is already whitelisted on the TV and stays
 whitelisted across reboots, so this is normally all you need.
 
 ### Run a command
 
 ```sh
-ssh rpi 'adb -s 192.168.1.141:5555 shell <command>'
+ssh rpi 'adb -s 192.168.1.138:5555 shell <command>'
 ```
 
-Note for zsh users: `A="adb -s 192.168.1.141:5555"; $A shell ...` **does not work** — zsh doesn't
+Note for zsh users: `A="adb -s 192.168.1.138:5555"; $A shell ...` **does not work** — zsh doesn't
 word-split unquoted variables, so it looks for a command literally named `adb -s 192.168…`. Use a
-shell variable for the address only: `D=192.168.1.141:5555; adb -s $D shell ...`.
+shell variable for the address only: `D=192.168.1.138:5555; adb -s $D shell ...`.
 
 ### Screenshot (the visual iteration loop)
 
 ```sh
-ssh rpi 'adb -s 192.168.1.141:5555 shell screencap -p > /tmp/shot.png'
+ssh rpi 'adb -s 192.168.1.138:5555 shell screencap -p > /tmp/shot.png'
 scp rpi:/tmp/shot.png ./shot.png
 ```
 
 **Always check the byte size.** A failed `screencap` writes an empty file rather than returning an
 error, so a 0-byte `shot.png` means the TV wasn't reachable, not that the screen was black.
 
+One exception worth knowing: **an HDMI passthrough input also screencaps as 0 bytes**, because it is
+a protected hardware surface rather than anything the compositor drew. So you cannot photograph the
+result of switching inputs — check `dumpsys window | grep mCurrentFocus` for
+`org.droidtv.playtv/.PlayTvActivity` instead, which is what the passthrough URI actually starts.
+
 ### When it won't connect
 
-`No route to host`, plus an `INCOMPLETE` entry in `ip neigh show 192.168.1.141`, means **the TV is
+`No route to host`, plus an `INCOMPLETE` entry in `ip neigh show 192.168.1.138`, means **the TV is
 powered off or in deep standby** — not that adb is broken. Turn the set on and reconnect. Check with:
 
 ```sh
-ssh rpi 'ping -c2 -W2 192.168.1.141'
+ssh rpi 'ping -c2 -W2 192.168.1.138'
+```
+
+If the set is on and it still says that, **the TV has moved to another DHCP address** (it went from
+`.141` to `.138` on 2026-09-26). Find it by the open adb port, then fix every address in this file:
+
+```sh
+ssh rpi 'for i in $(seq 1 254); do (timeout 1 bash -c "echo > /dev/tcp/192.168.1.$i/5555" 2>/dev/null && echo 192.168.1.$i) & done; wait'
 ```
 
 ### If the debugging key is ever revoked
@@ -112,9 +124,12 @@ originally lived — those will vanish on the next reboot of the Pi, so use the 
 ## Build
 
 The SDK lives at `~/Android/Sdk` on the VPS (cmdline-tools, `platforms;android-36`,
-`build-tools;36.0.0`). JDK 21.
+`build-tools;36.0.0`). JDK 21 is installed **through sdkman, and is not on `PATH` in a
+non-interactive shell** — a plain `./gradlew` there fails with "JAVA_HOME is not set and no 'java'
+command could be found", which looks like a missing JDK and is not one. Set it explicitly:
 
 ```sh
+export JAVA_HOME=/home/ruben/.sdkman/candidates/java/21.0.11-tem
 ANDROID_HOME=/home/ruben/Android/Sdk ./gradlew --no-daemon assembleDebug
 ```
 
@@ -133,7 +148,7 @@ Two things that will bite you:
 
 ```sh
 scp app/build/outputs/apk/debug/app-debug.apk rpi:/tmp/launch.apk
-ssh rpi 'adb -s 192.168.1.141:5555 install -r /tmp/launch.apk'
+ssh rpi 'adb -s 192.168.1.138:5555 install -r /tmp/launch.apk'
 ```
 
 Whole loop is about 90 seconds from edit to pixels on the TV.
@@ -144,11 +159,11 @@ This app is currently the default home.
 
 ```sh
 # make it home
-ssh rpi 'adb -s 192.168.1.141:5555 shell cmd package set-home-activity ink.grootnibbel.launch/.MainActivity'
+ssh rpi 'adb -s 192.168.1.138:5555 shell cmd package set-home-activity ink.grootnibbel.launch/.MainActivity'
 
 # verify — should report ink.grootnibbel.launch
-ssh rpi 'adb -s 192.168.1.141:5555 shell input keyevent KEYCODE_HOME'
-ssh rpi 'adb -s 192.168.1.141:5555 shell dumpsys window | grep mCurrentFocus'
+ssh rpi 'adb -s 192.168.1.138:5555 shell input keyevent KEYCODE_HOME'
+ssh rpi 'adb -s 192.168.1.138:5555 shell dumpsys window | grep mCurrentFocus'
 ```
 
 Philips' `org.droidtv.homeintentresolver` does **not** intercept the Home key, so third-party
@@ -224,7 +239,7 @@ the 18dp corner radius was settled.
 **Measure; don't estimate.**
 
 ```sh
-D=192.168.1.141:5555; P=ink.grootnibbel.launch
+D=192.168.1.138:5555; P=ink.grootnibbel.launch
 ssh rpi "adb -s $D shell dumpsys gfxinfo $P reset"     # then wait ~25s
 ssh rpi "adb -s $D shell dumpsys gfxinfo $P | grep -iE 'total frames|janky|percentile'"
 ssh rpi "adb -s $D shell top -b -n 1 | grep grootnibbel"
@@ -319,10 +334,15 @@ is the whole change.
 A process kill lands you back on the first tile, which is the right amount of memory for a launcher.
 
 The grid used to rebuild on every resume to keep HDMI live-state and app installs current. Neither
-needs it: the HDMI rail is dormant, and `APPS` is hardcoded, so the only way the tiles change is an
-edit and a reinstall, which restarts the process anyway. Re-enabling `hdmiTiles()` means refreshing
-that rail's connection state somewhere — `onResume` is still the obvious place, but for that rail
-only, not for the whole tree.
+needs it: `APPS` is hardcoded, so the only way the tiles change is an edit and a reinstall, which
+restarts the process anyway, and the sources row deliberately reads no connection state at all (see
+"Sources"). The sources row is built once on first use for the same reason.
+
+While the sources row is open the grid is set to `FOCUS_BLOCK_DESCENDANTS`, or a D-pad Up out of the
+row would land in the grid with the row still open. The grid's ring is explicitly hidden at the same
+moment: it hangs on the grid's foreground rather than on a tile, so nothing else would ever take it
+off the screen once focus left for the row, and two rings at once is the one thing this focus
+treatment must never show.
 
 ### The numeric keypad
 
@@ -366,6 +386,98 @@ Both `KEYCODE_1..9` and `KEYCODE_NUMPAD_1..9` are handled. The sets this TV pair
 `TPV_MutilRC` — TP Vision's own remotes) advertise `KEY_1..9` *and* `KEY_NUMERIC_1..9`, per
 `getevent -lp`, and which of the two arrives depends on the remote in your hand. With eight apps, 9
 and 0 do nothing.
+
+### Sources
+
+The remote's SOURCE key opens a row of the TV's four HDMI inputs in the empty space under the grid.
+Pressing it again escalates to Philips' own full "Bronnen" drawer; Back closes.
+
+**The key had to be caught in the app because nothing else on this set catches it.** Scancode 610 on
+the TPV remotes maps to `KEYCODE_TV_INPUT` via `/system/usr/keylayout/TPV_MutilRC.kl`, and it is
+**not a global key** here — no `GLOBAL_BUTTON` broadcast is sent, `org.droidtv.GlobalKey` never
+hears about it, and it is simply delivered to whatever is in the foreground. Philips relied on their
+own launcher to handle it, so from the moment this app became home the key went nowhere at all. That
+is the whole bug; it was never a permissions or an intent problem.
+
+Verify that routing with:
+
+```sh
+D=192.168.1.138:5555
+ssh rpi "adb -s $D shell 'logcat -c; input keyevent 178; sleep 3; logcat -d | grep -i tv_input'"
+```
+
+If the only hits are `injectKeyEvent` and `EmojiAltPhysicalKeyDetector`, the key reached window
+dispatch and no system handler wanted it.
+
+**`loadCustomLabel()` is what makes the row read like the TV's own.** It returns the name *you* gave
+the input during setup and `loadLabel()` returns the port, so the cards say "KPN" over "HDMI 3" and
+"Digitale ontvanger" over "HDMI 1 / MHL". Measured on this set on 2026-09-04:
+
+| input | `loadLabel` | `loadCustomLabel` | state |
+|---|---|---|---|
+| `…/HW5` | HDMI 1 / MHL | Digitale ontvanger | `CONNECTED` |
+| `…/HW6` | HDMI 2 | — | `CONNECTED_STANDBY` |
+| `…/HW7` | HDMI 3 | KPN | `CONNECTED_STANDBY` |
+| `…/HW8` | HDMI 4 | — | `CONNECTED_STANDBY` |
+
+`loadIcon()` returns null for every input, which is why the cards are typographic — an invented
+connector glyph would be the only picture on screen that nobody shipped.
+
+**Connection state is read by nothing, and that is deliberate.** Dimming dead ports is the obvious
+use for it and the first version of this code did exactly that, but the state does not mean what it
+says here: three of the four ports report `CONNECTED_STANDBY` including the two that Philips' own
+`HotplugEventListener` reports as empty. It cannot separate "a box in standby" from "nothing plugged
+in", so dimming on it would have greyed out the KPN receiver — one of the two inputs actually in use.
+
+**The row is four cards on the grid's own column spec** — same width, same 8 dp margins — so it
+lands exactly under the four columns and reads as one more row of the same wall. That is why there
+is no fifth card for the native drawer: a fifth would break the column rhythm for something wanted
+once in a while, so it sits on a second press of SOURCE instead. Every card carries a second line
+even when it is blank, because without that placeholder an unnamed port's title centres between its
+neighbours' two lines and no two titles share a baseline.
+
+Corner radius is 14 dp, not the tiles' 18: the card is half their height, and a radius that reads as
+a soft corner on a 112 dp tile reads as a lozenge on a 64 dp one.
+
+**The card face is white at 10%, not an opaque colour**, decided on the panel on 2026-09-04 against
+a four-way (6 / 10 / 16 / 24% across the four cards in one build, which is how the shortcut-digit
+treatments were settled too). Above about 10% the cards stop being quiet and start reading as grey
+chips. The gain over the opaque `0xFF1B1B24` this replaced is real but smaller than you would
+expect, and worth knowing why: over the scrim there is little light left behind a card to show
+through, so most of what translucency buys is lost exactly where it is used. What it does buy is
+that opaque was *darker* than the dimmed wall in places and read as four holes punched in it, where
+a translucent face reads as four panels lifted off it — and the faces now shift with the ambient
+glow instead of sitting on it as a fixed grey.
+
+That trade reverses if the row ever goes always-on: with no scrim there is a full-strength glow
+behind the cards, so translucency is worth much more there than it is here.
+
+**The rest of the screen dims behind it**, to `SCRIM = 0.55` black over full bleed. Fading the grid
+and the clock with plain `alpha` would have been cheaper — no full-screen blend — but it would have
+left the ambient glow at full strength behind a dimmed wall, and the point is to put the whole wall
+down, background included. The scrim is `GONE` rather than transparent when idle, so it costs
+nothing on the frames that are not part of a sources interaction. It is added to the root before the
+row exists purely for z-order: the row is added on first press and so lands above it.
+
+Measured over 30 focus moves in the row: **3.62% janky at a 90th percentile of 8 ms** without the
+scrim and **1.17% at 9 ms** with it, against a 20 ms budget. The full-screen blend costs about 1 ms
+at the median and nothing that shows. It reuses the ambient hold (see "The background") — the row
+has its own `RingLayer`, but both rings call the same `holdAmbient()`.
+
+#### It depends on `org.droidtv.eum` being enabled
+
+The second press hands off to `org.droidtv.channels/.sources.SourcesDrawerActivity` through AOSP's
+standard `com.android.tv.action.VIEW_INPUTS`. **That drawer was broken by the debloat** and was
+fixed on 2026-09-04 by re-enabling one package:
+
+```sh
+ssh rpi 'adb -s 192.168.1.138:5555 shell pm enable org.droidtv.eum'
+```
+
+Disabled, the activity starts, builds its whole source list, throws a `NullPointerException` out of
+`bindToEumService`, never takes focus and destroys itself — so the drawer appears to do nothing at
+all while logging a complete and correct list of sources. It costs **6.0 MB PSS** measured. Disable
+it again with `pm disable-user org.droidtv.eum`, at the price of the second press.
 
 ### The background
 
@@ -489,8 +601,8 @@ it looks like: both things that use this font draw nothing but digits.
 To survey what else is available before changing it:
 
 ```sh
-ssh rpi 'adb -s 192.168.1.141:5555 shell ls /system/fonts'
-ssh rpi 'adb -s 192.168.1.141:5555 shell "grep -o \"alias name=\\\"[a-z-]*\\\"\" /system/etc/fonts.xml | sort -u"'
+ssh rpi 'adb -s 192.168.1.138:5555 shell ls /system/fonts'
+ssh rpi 'adb -s 192.168.1.138:5555 shell "grep -o \"alias name=\\\"[a-z-]*\\\"\" /system/etc/fonts.xml | sort -u"'
 ```
 
 The set carries the full Roboto family (thin through black, plus condensed), Noto Serif, Droid Sans
@@ -503,7 +615,7 @@ rollover whichever face you choose.
 Edit `APPS` in `Tiles.kt`. The list is in grid order, left to right then down. Find package names with:
 
 ```sh
-ssh rpi 'adb -s 192.168.1.141:5555 shell "for p in \$(pm list packages -e | sed s/package://); do \
+ssh rpi 'adb -s 192.168.1.138:5555 shell "for p in \$(pm list packages -e | sed s/package://); do \
   r=\$(cmd package resolve-activity --brief -c android.intent.category.LEANBACK_LAUNCHER \$p 2>/dev/null | tail -1); \
   case \$r in */*) echo \"\$r\";; esac; done"'
 ```
@@ -514,12 +626,9 @@ ssh rpi 'adb -s 192.168.1.141:5555 shell "for p in \$(pm list packages -e | sed 
 
 ## Not done yet
 
-- **HDMI inputs.** Built, verified working on the hardware, then removed from the layout for now.
-  `hdmiTiles()` in `Tiles.kt` is intact and dormant: it enumerates `TvInputManager` HDMI inputs
-  (`HW5`–`HW8` = HDMI 1–4), reads live connection state per input so dead ones can dim, and launches
-  via `TvContract.buildChannelUriForPassthroughInput`. It needs no special permission. Re-enabling
-  means restoring the left-hand rail in `MainActivity`. Watch out: Philips labels HDMI 1
-  "HDMI 1 / MHL", which clipped in an 84 dp rail.
+- **HDMI inputs on the home screen.** The sources row exists and is reachable from the SOURCE key
+  (see "Sources"), but nothing about the inputs is visible until you press it. Whether some or all
+  of them should sit on the wall permanently is an open design question, not a missing feature.
 - **User-editable app list**, and a settings button where an app drawer would live.
 - **A 3x3 grid.** Nine apps would put every number key to work. Worth knowing before committing:
   at four columns a tile is ~416 px wide and the 320x180 banners upscale 1.3x; at three columns
